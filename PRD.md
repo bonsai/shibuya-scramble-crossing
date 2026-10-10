@@ -1,7 +1,7 @@
 # PRD: Shibuya Scramble Crossing 3DGS
 
 **Product Requirements Document**  
-最終更新: 2026-10-10（設計更新: R2 → Colab 直送）
+最終更新: 2026-10-10（街=3DGS / 人=浮く写真、PC=3DGS・モバイル=ポリゴン）
 
 ---
 
@@ -9,20 +9,31 @@
 
 ### 1.1 ビジョン
 
-渋谷スクランブル交差点を、クラウドソースされた多数の写真から **3D Gaussian Splatting (3DGS)** で再構築し、ブラウザ上で誰でも自由に視点を動かせる Web 体験を提供する。
+渋谷スクランブル交差点を **歩ける街の器** として再構築し、投稿された実写写真を空間に残すことで、**「見て、私ここにいた！」** 体験をブラウザで提供する。
 
 ### 1.2 コンセプト
 
-- 時間差でいろんな人が集合して写真を投稿（クラウドソース）
-- 写真投稿 → **R2 保存** → **Colab で 3DGS 学習** → **JS のみで表示**
-- インフラは **Cloudflare** 中心（Workers + R2）
-- 学習は **Colab / Kaggle** 上で Python 実行
-- **中継ストレージなし**（MEGA / GCS 等は使わない）。Colab が R2 から直接取得する
+- 時間差でいろんな人が写真を投稿（クラウドソース）
+- **街は 3DGS**（建物・地面・看板の器）。人物の立体つなぎ合わせはしない
+- **人は画像のまま** 3D 空間にパネルとして浮かべる
+- 写真投稿 → R2 → Colab で街用 3DGS 学習 → JS ビューア
+- インフラは **Cloudflare**（Workers + R2）、学習は **Colab**（R2 直取得・中継ストレージなし）
 
-### 1.3 対象ユーザー
+### 1.3 表示の二層（端末別）
 
-- 渋谷交差点に興味がある一般ユーザー（写真投稿・3D閲覧）
-- 開発者・実験者（パイプライン改善・モデル再学習）
+| 端末 | 街（ステージ） | 人（投稿写真） | ねらい |
+|------|----------------|----------------|--------|
+| **PC（がっつり）** | **3DGS** | 多数パネル＋拡大 | 高品質・見回し |
+| **スマホ（あっさり）** | **ポリゴン（GLB 等）** | 少数 or ピン＋リスト | 軽量・熱対策 |
+
+体験（街の中に「ここにいた」写真がある）は共通。リッチさだけ端末で変える。
+
+Poly Haven に渋谷交差点一式はない。スマホ用メッシュは既存アセット／自作 GLB、PC 用は自前 3DGS を本線とする。
+
+### 1.4 対象ユーザー
+
+- 一般ユーザー（写真投稿・3D 閲覧）
+- 開発者（パイプライン・ビューア改善）
 
 ---
 
@@ -32,21 +43,20 @@
 
 | # | 項目 | 優先度 | 状態 |
 |---|------|--------|------|
-| G1 | 写真アップロードサイト（Web） | P0 | 実装済み（最小） |
-| G2 | R2 への写真保存 | P0 | 実装済み |
-| G3 | 3DGS 学習パイプライン（Colab、R2 直取得） | P0 | テンプレート済み |
-| G4 | JS のみの 3DGS ビューア | P0 | 未着手 |
-| G5 | 学習済みモデルの配信（R2 `models/`） | P0 | 未着手 |
-| G6 | ローカル運用支援（任意・MCP 等） | P2 | 後回し可 |
+| G1 | 写真アップロード（Web → R2） | P0 | 実装済み（最小） |
+| G2 | 街用 3DGS 学習（Colab、R2 直取得） | P0 | テンプレート済み |
+| G3 | **街=3DGS / 人=浮く写真** の方針でビューア | P0 | 未着手 |
+| G4 | **PC=3DGS / モバイル=ポリゴン** の切り替え | P0 | 未着手 |
+| G5 | モデル配信（R2 `models/`） | P0 | 未着手 |
+| G6 | placement（写真の位置メタ） | P1 | 未着手 |
 
-### 2.2 非ゴール（初期段階ではやらない）
+### 2.2 非ゴール（初期）
 
-- リアルタイム学習
+- 人物の 3D 復元・同一人物マッチング
 - 完全自動の人マスク除去
-- モバイル専用アプリ
-- 高頻度の再学習（日次など）
-- 中継用クラウド（MEGA / GCS 等）の常設
-- ローカルから画像ファイルを Colab に直接アップロードする運用（原則 R2 経由）
+- モバイル専用ネイティブアプリ
+- 中継ストレージ（MEGA 等）の常設
+- 全端末で同一の最高品質 3DGS 強制
 
 ---
 
@@ -58,242 +68,195 @@
    ▼
 [Cloudflare Workers]
    │
-   ├─► [R2]  photos/   （原本・永続）
-   │         models/   （学習済み .ply / .splat）
+   ├─► [R2]  photos/           投稿写真
+   │         models/city_gs/   PC用 3DGS
+   │         models/city_low/  モバイル用 GLB
+   │         placements/       写真の位置（任意）
    │
-   └─► [Viewer]  JS のみで 3DGS 表示
+   └─► [Viewer]
+         PC     → 3DGS 街 + 写真パネル
+         Mobile → GLB 街 + 写真（軽量）
 
-[Google Colab / Kaggle]
-   │ boto3 等で R2 から直接ダウンロード
-   ├─ COLMAP（カメラ姿勢推定）
-   ├─ 3DGS 学習（train.py）
-   └─ .ply 出力
-         │
-         ▼（任意）
-   [R2 models/ にアップロード] または ローカル保存
+[Colab]
+   R2 photos/ → COLMAP → 3DGS → models/city_gs/
 ```
 
-### 3.1 コンポーネント役割
+### 3.1 レイヤ設計
 
-| コンポーネント | 役割 | 技術 |
-|----------------|------|------|
-| 写真投稿 | アップロード UI / API | Cloudflare Workers + 静的 HTML |
-| オブジェクトストレージ | 写真原本・モデル保管（**唯一の永続ストレージ**） | Cloudflare R2 |
-| 学習実行 | R2 取得 → COLMAP → 3DGS | Google Colab / Kaggle |
-| ビューア | 3DGS 表示 | JS（gsplat.js / Spark.js 等） |
-| デプロイ | API + フロント | TypeScript / Workers（将来 Go も可） |
-
-### 3.2 やらないこと（設計上の明示）
-
-- ローカル PC に学習用画像を溜めて Colab に送る主経路にはしない
-- MEGA 等の一時ステージングは採用しない（必要なら将来オプション）
+| レイヤ | 役割 | 実装 |
+|--------|------|------|
+| **街** | 交差点の器 | PC: 3DGS / モバイル: ポリゴン |
+| **人** | 「ここにいた」証拠 | 実写を Plane / ビルボードで配置 |
+| **投稿** | 写真の収集 | Workers + R2 |
 
 ---
 
 ## 4. データ設計
 
-### 4.1 R2 構成（永続・唯一）
+### 4.1 R2 構成
 
 ```
 r2://shibuya-scramble/
 ├── photos/
-│   ├── YYYY-MM-DD/
-│   │   ├── <timestamp>_<id>.jpg
-│   │   └── ...
-│   └── ...
+│   └── YYYY-MM-DD/<timestamp>_<id>.jpg
 ├── models/
-│   ├── YYYY-MM-DD_vN/
+│   ├── city_gs/          # PC
 │   │   ├── point_cloud.ply
-│   │   ├── metadata.json
-│   │   └── ...
-│   └── ...
+│   │   └── metadata.json
+│   └── city_low/         # Mobile
+│       ├── city.glb
+│       └── metadata.json
+├── placements/           # 任意
+│   └── <id>.json
 └── meta/
-    └── index.json          # 将来用
+    └── index.json
 ```
 
-アップロード API の保存キー例:
+### 4.2 placement（浮かぶ写真）
 
+```json
+{
+  "photo_key": "photos/2026-10-10/xxx.jpg",
+  "position": [0.0, 1.6, -5.0],
+  "rotation_y": 45,
+  "scale": 1.2,
+  "created_at": "2026-10-10T12:00:00Z"
+}
 ```
-photos/2026-10-10/1728567890123_a1b2c3d4e5f6.jpg
-```
 
-### 4.2 画像保持方針
+初期はビューア側のデフォルト配置（グリッド／ランダム）でよい。
 
-| 場所 | 保持内容 | 削除タイミング |
-|------|----------|----------------|
-| **R2** | 全写真 + 学習済みモデル | 基本残す |
-| **Colab ディスク** | 学習中の `input/` と出力 | セッション終了で消える（問題なし） |
+### 4.3 保持方針
 
-- 1回の学習目安: 100〜200 枚
-- 中継ストレージの容量制限（20GB 等）は **考慮不要**（R2 + Colab エフェメラルのみ）
+| 場所 | 内容 |
+|------|------|
+| R2 | 写真・両モデル・placement を永続 |
+| Colab | 学習中のみ（終了で消えてよい） |
 
 ---
 
-## 5. 3DGS 加工パイプライン
+## 5. 街用 3DGS パイプライン
 
-### 5.1 手順概要
+1. 投稿写真が R2 `photos/` に蓄積（目安 100 枚〜）
+2. Colab が R2 から直接取得 → COLMAP → `train.py`
+3. `.ply` を `models/city_gs/` へ
 
-1. **写真収集** — ブラウザ → Workers → R2 `photos/`
-2. **Colab で R2 から取得** — boto3（S3 互換）で `input/` に並べる
-3. **COLMAP** — カメラ位置・姿勢推定
-4. **3DGS 学習** — `train.py`
-5. **出力** — `point_cloud.ply`
-6. **配信** — R2 `models/` へ（任意）→ JS ビューア
-
-手順の詳細・セル全文: [docs/colab-r2-3dgs.md](./docs/colab-r2-3dgs.md)  
+詳細: [docs/colab-r2-3dgs.md](./docs/colab-r2-3dgs.md)  
 ノートブック: [colab/r2_3dgs_template.ipynb](./colab/r2_3dgs_template.ipynb)
 
-### 5.2 COLMAP（概要）
-
-- 公式 `convert.py` を優先
-- 失敗時は CPU 強制（`SiftExtraction.use_gpu 0`）や解像度制限（`max_image_size 1600`）
-- 無料 T4 不安定時は [3DGS-Colab-Free-T4](https://github.com/tianxingleo/3DGS-Colab-Free-T4) を参考
-
-### 5.3 3DGS 学習
-
-```bash
-python train.py -s <data> -m <output> \
-  --iterations 15000 \
-  --save_iterations 7000 15000
-```
-
-- プレビュー: 7,000 iterations
-- 本番品質: 30,000 iterations
-
-### 5.4 参考実装
-
-- 公式: [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)
-- Colab 安定化: [tianxingleo/3DGS-Colab-Free-T4](https://github.com/tianxingleo/3DGS-Colab-Free-T4)
+**学習の成功基準**: 建物・地面・看板が立っていればよい。人物品質は問わない。
 
 ---
 
-## 6. Colab ↔ R2 接続
+## 6. ビューア要件
 
-### 6.1 方式（現行）
+### 6.1 共通
 
-| 方式 | 内容 | 備考 |
-|------|------|------|
-| **boto3 + R2 API トークン** | Colab から list / download /（任意）upload | 実装済み（テンプレート） |
+- JS のみ（ネイティブアプリ不要）
+- 街の上に投稿写真パネル
+- クリック／タップで写真拡大（「ここにいた」）
 
-### 6.2 将来オプション
+### 6.2 PC（がっつり）
 
-| 方式 | 内容 | 目的 |
-|------|------|------|
-| Presigned URL | Workers が一時 URL を発行 | Colab に長期キーを置かない |
-| バッチ zip API | Workers が複数枚をまとめて返す | 取得簡略化（サイズ制限に注意） |
+- 街: 3DGS（gsplat.js / Spark.js 等）
+- 写真: 多数を空間配置、ビルボード可
 
-### 6.3 認証注意
+### 6.3 モバイル（あっさり）
 
-- R2 API トークンはノートブックに直書きせず、可能なら Colab シークレットや実行時入力にする
-- トークンは Git にコミットしない
+- 街: glTF/GLB ポリゴン（Three.js）
+- 写真: 少数表示、またはピン＋リスト
+- 3DGS 必須にしない（熱・フレーム落ち回避）
 
----
+### 6.4 切り替え
 
-## 7. ビューア要件
-
-- **JS のみ**で動作（追加ネイティブ依存なし）
-- 対応フォーマット: `.ply` / `.splat` / `.spz`
-- 候補ライブラリ:
-  - [gsplat.js](https://github.com/huggingface/gsplat.js)
-  - Spark.js
-  - SuperSplat 等
-- モデルは R2 `models/` から配信（Workers 経由 or 公開バケット）
+- 画面幅・タッチ・簡易 GPU 判定などでデフォルト選択
+- 「高品質（3DGS）」を手動選択できると望ましい（対応端末のみ）
 
 ---
 
-## 8. デプロイ構成
+## 7. デプロイ
 
 | レイヤ | 技術 | 状態 |
 |--------|------|------|
-| アップロード API + UI | Workers (`src/index.ts`) + `public/` | 実装済み |
-| ストレージ | R2 `shibuya-scramble` | 要バケット作成 |
-| 学習 | Colab テンプレート | ドキュメント済み |
+| アップロード | Workers + `public/` | 実装済み |
+| R2 | `shibuya-scramble` | 要作成 |
+| 学習 | Colab テンプレ | ドキュメント済み |
 | ビューア | 未実装 | Phase 2 |
-| 認証 | 当面なし | 本番前に制限追加 |
 
-セットアップ: [docs/setup-r2.md](./docs/setup-r2.md)
-
----
-
-## 9. 運用フロー（日常）
-
-1. ユーザーが写真を投稿 → R2 `photos/`
-2. 学習するとき Colab を開く
-3. 設定セルに R2 認証・`R2_PREFIX`・`MAX_IMAGES` を入れる
-4. ダウンロード → COLMAP → `train.py`
-5. `.ply` をダウンロード、または R2 `models/` に upload
-6. ビューアが `models/` を参照して表示（Phase 2）
-
-ローカルマシンは **開発・デプロイ・ドキュメント** 用。学習用画像の中継はしない。
+[docs/setup-r2.md](./docs/setup-r2.md)
 
 ---
 
-## 10. 成功指標（MVP）
+## 8. 運用フロー
+
+1. ユーザーが写真投稿 → R2 `photos/`
+2. 街モデル更新時: Colab で 3DGS 学習 → `city_gs/`
+3. モバイル用 GLB は別途用意／更新 → `city_low/`
+4. ビューアが端末に応じて街アセットを選択し、写真を載せる
+
+---
+
+## 9. 成功指標（MVP）
 
 | 指標 | 目標 |
 |------|------|
-| 写真投稿 | ブラウザから R2 に保存できる |
-| R2 → Colab | 100 枚以上を取得できる |
-| 1回の学習完走 | `.ply` が生成される |
-| ビューア表示 | ブラウザで回転・ズーム可能 |
-| 運用 | Colab だけで学習を完結できる |
+| 投稿 | R2 に保存できる |
+| 街 3DGS | 100 枚前後で `.ply` が得られる |
+| PC 表示 | 3DGS 街＋写真パネル |
+| モバイル表示 | ポリゴン街＋写真（軽量） |
+| 体験 | 「ここにいた」が伝わる |
 
 ---
 
-## 11. リスクと対策
+## 10. リスクと対策
 
 | リスク | 対策 |
 |--------|------|
-| Colab 無料枠の不安定さ | 安定化ノートブック / Pro / 枚数・解像度を落とす |
-| COLMAP 失敗 | CPU モード、リサイズ、枚数削減 |
-| R2 認証の扱い | シークレット管理、将来 presign |
-| 人の写り込みノイズ | 将来 SAM 等（非ゴール） |
-| 写真の角度不足 | 投稿ガイド・最低枚数の案内 |
-| 公開アップロードの悪用 | レート制限・認証（本番前） |
+| スマホで 3DGS が重い | **デフォルトはポリゴン** |
+| 人物が 3DGS でにじむ | 人はパネル化（方針で回避） |
+| Colab / COLMAP 不安定 | 枚数・解像度・CPU モード |
+| 既存メッシュのライセンス | 自前 3DGS 本線、流用時は条件確認 |
+| 公開アップロード悪用 | 本番前にレート制限・認証 |
 
 ---
 
-## 12. ロードマップ
+## 11. ロードマップ
 
 ### Phase 0 — 基盤
-- [x] リポジトリ初期化
-- [x] PRD
-- [x] 写真アップロード API / UI 最小実装
-- [ ] R2 バケット作成（運用者が実施）
-- [ ] `wrangler deploy` で本番公開
+- [x] リポジトリ・PRD・アップロード API/UI
+- [ ] R2 バケット作成・deploy
 
-### Phase 1 — 学習パイプライン
-- [x] Colab テンプレート（R2 直取得）
-- [x] 手順書 `docs/colab-r2-3dgs.md`
-- [ ] 実データで 1 回の 3DGS 学習完走
-- [ ] （任意）Workers に presign API
+### Phase 1 — 街モデル
+- [x] Colab R2→3DGS テンプレート
+- [ ] 実データで `city_gs` を 1 本
+- [ ] モバイル用 `city_low.glb`（既存 or 簡易）
 
 ### Phase 2 — ビューア
-- [ ] JS ビューア組み込み
-- [ ] R2 `models/` から配信
+- [ ] モバイル: GLB 街 + 浮く写真（骨格を先に）
+- [ ] PC: 3DGS 街 + 同じ写真配置
+- [ ] 端末自動切り替え
+- [ ] placement メタ（任意）
 
 ### Phase 3 — 改善
-- [ ] バッチ選択（日付・最新 N 枚）
-- [ ] 投稿の認証・レート制限
-- [ ] 投稿体験の改善
+- [ ] 配置の改善、認証・レート制限、投稿 UX
 
 ---
 
-## 13. 参考リンク
+## 12. 参考
 
-- [gaussian-splatting (公式)](https://github.com/graphdeco-inria/gaussian-splatting)
+- [gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)
 - [gsplat.js](https://github.com/huggingface/gsplat.js)
-- [3DGS Colab Free T4](https://github.com/tianxingleo/3DGS-Colab-Free-T4)
-- [Cloudflare R2 Docs](https://developers.cloudflare.com/r2/)
-- 本リポジトリ: [docs/colab-r2-3dgs.md](./docs/colab-r2-3dgs.md) / [docs/setup-r2.md](./docs/setup-r2.md)
+- [docs/colab-r2-3dgs.md](./docs/colab-r2-3dgs.md)
+- [docs/setup-r2.md](./docs/setup-r2.md)
+- Poly Haven: 渋谷交差点一式はなし（部品・HDRI 用途）
 
 ---
 
-## 14. 用語
+## 13. 用語
 
 | 用語 | 意味 |
 |------|------|
-| 3DGS | 3D Gaussian Splatting |
-| COLMAP | Structure-from-Motion / MVS ツール |
-| R2 | Cloudflare のオブジェクトストレージ（本プロジェクトの永続置き場） |
-| バッチ | 1回の学習に使う写真セット（R2 上の prefix + 枚数で指定） |
+| 3DGS | 3D Gaussian Splatting（PC 用の街） |
+| ポリゴン / GLB | モバイル用の軽量メッシュ街 |
+| パネル | 空間に浮かぶ投稿写真 |
+| placement | 写真の 3D 位置メタデータ |
