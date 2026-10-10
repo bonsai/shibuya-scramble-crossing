@@ -1,7 +1,7 @@
 # PRD: Shibuya Scramble Crossing 3DGS
 
 **Product Requirements Document**  
-最終更新: 2026-10-10
+最終更新: 2026-10-10（設計更新: R2 → Colab 直送）
 
 ---
 
@@ -14,10 +14,10 @@
 ### 1.2 コンセプト
 
 - 時間差でいろんな人が集合して写真を投稿（クラウドソース）
-- 写真投稿 → 解析 → 3DGS 構築 → JS のみで表示
-- インフラは **Cloudflare** 中心（Workers + Pages + R2）
+- 写真投稿 → **R2 保存** → **Colab で 3DGS 学習** → **JS のみで表示**
+- インフラは **Cloudflare** 中心（Workers + R2）
 - 学習は **Colab / Kaggle** 上で Python 実行
-- 運用コストを抑え、一時ストレージは **20GB 以下** で回す
+- **中継ストレージなし**（MEGA / GCS 等は使わない）。Colab が R2 から直接取得する
 
 ### 1.3 対象ユーザー
 
@@ -30,14 +30,14 @@
 
 ### 2.1 ゴール（MVP）
 
-| # | 項目 | 優先度 |
-|---|------|--------|
-| G1 | 写真アップロードサイト（Web） | P0 |
-| G2 | R2 への写真保存 | P0 |
-| G3 | 3DGS 学習パイプライン（Colab） | P0 |
-| G4 | JS のみの 3DGS ビューア | P0 |
-| G5 | 学習済みモデルの配信 | P0 |
-| G6 | ローカル MCP によるバッチ準備・運用支援 | P1 |
+| # | 項目 | 優先度 | 状態 |
+|---|------|--------|------|
+| G1 | 写真アップロードサイト（Web） | P0 | 実装済み（最小） |
+| G2 | R2 への写真保存 | P0 | 実装済み |
+| G3 | 3DGS 学習パイプライン（Colab、R2 直取得） | P0 | テンプレート済み |
+| G4 | JS のみの 3DGS ビューア | P0 | 未着手 |
+| G5 | 学習済みモデルの配信（R2 `models/`） | P0 | 未着手 |
+| G6 | ローカル運用支援（任意・MCP 等） | P2 | 後回し可 |
 
 ### 2.2 非ゴール（初期段階ではやらない）
 
@@ -45,6 +45,8 @@
 - 完全自動の人マスク除去
 - モバイル専用アプリ
 - 高頻度の再学習（日次など）
+- 中継用クラウド（MEGA / GCS 等）の常設
+- ローカルから画像ファイルを Colab に直接アップロードする運用（原則 R2 経由）
 
 ---
 
@@ -54,51 +56,49 @@
 [Browser]
    │ 写真アップロード / 3D閲覧
    ▼
-[Cloudflare Pages + Workers]
+[Cloudflare Workers]
    │
    ├─► [R2]  photos/   （原本・永続）
    │         models/   （学習済み .ply / .splat）
    │
    └─► [Viewer]  JS のみで 3DGS 表示
 
-[ローカル MCP Server]
-   │ R2 から必要バッチを抽出
-   ▼
-[MEGA]  一時ステージング（≤20GB）
-   │
-   ▼
-[Google Colab]
+[Google Colab / Kaggle]
+   │ boto3 等で R2 から直接ダウンロード
    ├─ COLMAP（カメラ姿勢推定）
-   ├─ 3DGS 学習
+   ├─ 3DGS 学習（train.py）
    └─ .ply 出力
-   │
-   ▼
-[R2 models/ に保存] → MEGA 一時データ削除
+         │
+         ▼（任意）
+   [R2 models/ にアップロード] または ローカル保存
 ```
 
 ### 3.1 コンポーネント役割
 
 | コンポーネント | 役割 | 技術 |
 |----------------|------|------|
-| 写真投稿サイト | アップロード UI / API | Cloudflare Pages + Workers |
-| オブジェクトストレージ | 写真原本・モデル保管 | Cloudflare R2 |
-| 一時ステージング | 学習用バッチ | MEGA（無料20GB） |
-| 学習実行環境 | COLMAP + 3DGS | Google Colab / Kaggle |
-| オーケストレーション | バッチ作成・削除・モデル転送 | ローカル MCP (FastMCP) |
+| 写真投稿 | アップロード UI / API | Cloudflare Workers + 静的 HTML |
+| オブジェクトストレージ | 写真原本・モデル保管（**唯一の永続ストレージ**） | Cloudflare R2 |
+| 学習実行 | R2 取得 → COLMAP → 3DGS | Google Colab / Kaggle |
 | ビューア | 3DGS 表示 | JS（gsplat.js / Spark.js 等） |
-| デプロイ | フロント・API | Go / TypeScript / Cloudflare |
+| デプロイ | API + フロント | TypeScript / Workers（将来 Go も可） |
+
+### 3.2 やらないこと（設計上の明示）
+
+- ローカル PC に学習用画像を溜めて Colab に送る主経路にはしない
+- MEGA 等の一時ステージングは採用しない（必要なら将来オプション）
 
 ---
 
 ## 4. データ設計
 
-### 4.1 R2 構成（永続）
+### 4.1 R2 構成（永続・唯一）
 
 ```
 r2://shibuya-scramble/
 ├── photos/
 │   ├── YYYY-MM-DD/
-│   │   ├── img_xxx.jpg
+│   │   ├── <timestamp>_<id>.jpg
 │   │   └── ...
 │   └── ...
 ├── models/
@@ -108,31 +108,24 @@ r2://shibuya-scramble/
 │   │   └── ...
 │   └── ...
 └── meta/
-    └── index.json
+    └── index.json          # 将来用
 ```
 
-### 4.2 MEGA 構成（一時・20GB以内）
+アップロード API の保存キー例:
 
 ```
-/Root/shibuya-temp/
-├── batch_YYYYMMDD_HHMM/
-│   ├── input/              # COLMAP 用画像
-│   │   ├── 0001.jpg
-│   │   └── ...
-│   └── batch_info.json
-└── ...（学習後削除）
+photos/2026-10-10/1728567890123_a1b2c3d4e5f6.jpg
 ```
 
-### 4.3 画像保持方針
+### 4.2 画像保持方針
 
 | 場所 | 保持内容 | 削除タイミング |
 |------|----------|----------------|
-| R2 | 全写真 + 学習済みモデル | 基本残す |
-| MEGA | 1学習分のバッチのみ | 学習成功後すぐ削除 |
-| Colab | 作業中のみ | セッション終了時 |
+| **R2** | 全写真 + 学習済みモデル | 基本残す |
+| **Colab ディスク** | 学習中の `input/` と出力 | セッション終了で消える（問題なし） |
 
-- 1バッチ目安: 100〜200枚 ≈ 0.4〜1.2 GB
-- 常時使用量を 5GB 以下に抑える設計
+- 1回の学習目安: 100〜200 枚
+- 中継ストレージの容量制限（20GB 等）は **考慮不要**（R2 + Colab エフェメラルのみ）
 
 ---
 
@@ -140,47 +133,26 @@ r2://shibuya-scramble/
 
 ### 5.1 手順概要
 
-1. **写真収集** — R2 に蓄積
-2. **バッチ準備** — MCP で R2 → MEGA
-3. **COLMAP** — カメラ位置・姿勢推定（Structure-from-Motion）
-4. **3DGS 学習** — Gaussian Splatting 最適化
-5. **出力** — `.ply` / `.splat`
-6. **配信** — R2 に保存 → JS ビューアで表示
-7. **クリーンアップ** — MEGA 一時データ削除
+1. **写真収集** — ブラウザ → Workers → R2 `photos/`
+2. **Colab で R2 から取得** — boto3（S3 互換）で `input/` に並べる
+3. **COLMAP** — カメラ位置・姿勢推定
+4. **3DGS 学習** — `train.py`
+5. **出力** — `point_cloud.ply`
+6. **配信** — R2 `models/` へ（任意）→ JS ビューア
 
-### 5.2 COLMAP（典型コマンド）
+手順の詳細・セル全文: [docs/colab-r2-3dgs.md](./docs/colab-r2-3dgs.md)  
+ノートブック: [colab/r2_3dgs_template.ipynb](./colab/r2_3dgs_template.ipynb)
 
-```bash
-colmap feature_extractor \
-  --database_path database.db \
-  --image_path input \
-  --ImageReader.single_camera 1 \
-  --SiftExtraction.use_gpu 0
+### 5.2 COLMAP（概要）
 
-colmap exhaustive_matcher \
-  --database_path database.db \
-  --SiftMatching.use_gpu 0
-
-colmap mapper \
-  --database_path database.db \
-  --image_path input \
-  --output_path distorted/sparse
-
-colmap image_undistorter \
-  --image_path input \
-  --input_path distorted/sparse/0 \
-  --output_path . \
-  --output_type COLMAP \
-  --max_image_size 1600
-```
-
-または公式 `convert.py` を利用。
+- 公式 `convert.py` を優先
+- 失敗時は CPU 強制（`SiftExtraction.use_gpu 0`）や解像度制限（`max_image_size 1600`）
+- 無料 T4 不安定時は [3DGS-Colab-Free-T4](https://github.com/tianxingleo/3DGS-Colab-Free-T4) を参考
 
 ### 5.3 3DGS 学習
 
 ```bash
-python train.py -s /path/to/data \
-  -m /path/to/output \
+python train.py -s <data> -m <output> \
   --iterations 15000 \
   --save_iterations 7000 15000
 ```
@@ -188,44 +160,32 @@ python train.py -s /path/to/data \
 - プレビュー: 7,000 iterations
 - 本番品質: 30,000 iterations
 
-### 5.4 推奨環境・参考
+### 5.4 参考実装
 
-- Colab 無料 T4 向け安定化: [tianxingleo/3DGS-Colab-Free-T4](https://github.com/tianxingleo/3DGS-Colab-Free-T4)
-- カスタムデータ用テンプレート: [benyoon1/gaussian-splat-colab](https://github.com/benyoon1/gaussian-splat-colab)
 - 公式: [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)
+- Colab 安定化: [tianxingleo/3DGS-Colab-Free-T4](https://github.com/tianxingleo/3DGS-Colab-Free-T4)
 
 ---
 
-## 6. ローカル MCP サーバー仕様
+## 6. Colab ↔ R2 接続
 
-### 6.1 目的
+### 6.1 方式（現行）
 
-AI エージェント（Cursor / Claude / Grok 等）から R2・MEGA を操作し、学習バッチの準備と後処理を自然言語で行えるようにする。
+| 方式 | 内容 | 備考 |
+|------|------|------|
+| **boto3 + R2 API トークン** | Colab から list / download /（任意）upload | 実装済み（テンプレート） |
 
-### 6.2 ツール一覧
+### 6.2 将来オプション
 
-| ツール | 説明 |
-|--------|------|
-| `list_r2_photos` | R2 の写真一覧取得 |
-| `prepare_batch` | R2 → MEGA に学習用バッチ作成 |
-| `cleanup_mega_batch` | MEGA 一時バッチ削除 |
-| `upload_model_to_r2` | 学習済みモデルを R2 に保存 |
+| 方式 | 内容 | 目的 |
+|------|------|------|
+| Presigned URL | Workers が一時 URL を発行 | Colab に長期キーを置かない |
+| バッチ zip API | Workers が複数枚をまとめて返す | 取得簡略化（サイズ制限に注意） |
 
-### 6.3 技術スタック
+### 6.3 認証注意
 
-- FastMCP
-- boto3（R2 = S3 互換）
-- mega.py
-- python-dotenv
-
-### 6.4 実装場所（予定）
-
-```
-mcp/
-├── server.py
-├── requirements.txt
-└── .env.example
-```
+- R2 API トークンはノートブックに直書きせず、可能なら Colab シークレットや実行時入力にする
+- トークンは Git にコミットしない
 
 ---
 
@@ -237,32 +197,34 @@ mcp/
   - [gsplat.js](https://github.com/huggingface/gsplat.js)
   - Spark.js
   - SuperSplat 等
-- Cloudflare Pages で静的配信
+- モデルは R2 `models/` から配信（Workers 経由 or 公開バケット）
 
 ---
 
-## 8. デプロイ構成（予定）
+## 8. デプロイ構成
 
-| レイヤ | 技術 |
-|--------|------|
-| フロントエンド | TypeScript + Cloudflare Pages |
-| API / アップロード | Cloudflare Workers（必要に応じて Go） |
-| ストレージ | R2 |
-| 認証 | 当面なし or Cloudflare Access（任意） |
+| レイヤ | 技術 | 状態 |
+|--------|------|------|
+| アップロード API + UI | Workers (`src/index.ts`) + `public/` | 実装済み |
+| ストレージ | R2 `shibuya-scramble` | 要バケット作成 |
+| 学習 | Colab テンプレート | ドキュメント済み |
+| ビューア | 未実装 | Phase 2 |
+| 認証 | 当面なし | 本番前に制限追加 |
+
+セットアップ: [docs/setup-r2.md](./docs/setup-r2.md)
 
 ---
 
 ## 9. 運用フロー（日常）
 
-1. ユーザーが写真を投稿 → R2 `photos/` に蓄積
-2. 学習タイミングで MCP に指示  
-   「最新 150 枚でバッチを作って」
-3. MCP が `prepare_batch` 実行 → MEGA に配置
-4. Colab ノートブックで COLMAP + 3DGS 実行
-5. `.ply` をダウンロード
-6. MCP で `upload_model_to_r2` → R2 `models/` へ
-7. MCP で `cleanup_mega_batch` → MEGA 削除
-8. ビューアが新しいモデルを配信
+1. ユーザーが写真を投稿 → R2 `photos/`
+2. 学習するとき Colab を開く
+3. 設定セルに R2 認証・`R2_PREFIX`・`MAX_IMAGES` を入れる
+4. ダウンロード → COLMAP → `train.py`
+5. `.ply` をダウンロード、または R2 `models/` に upload
+6. ビューアが `models/` を参照して表示（Phase 2）
+
+ローカルマシンは **開発・デプロイ・ドキュメント** 用。学習用画像の中継はしない。
 
 ---
 
@@ -270,11 +232,11 @@ mcp/
 
 | 指標 | 目標 |
 |------|------|
-| 写真投稿 | 動作すること |
-| 1回の学習完走 | 100枚以上で .ply 生成 |
+| 写真投稿 | ブラウザから R2 に保存できる |
+| R2 → Colab | 100 枚以上を取得できる |
+| 1回の学習完走 | `.ply` が生成される |
 | ビューア表示 | ブラウザで回転・ズーム可能 |
-| 一時ストレージ | MEGA 使用量 20GB 以下を維持 |
-| 運用手間 | MCP + Colab で手動でも回せる |
+| 運用 | Colab だけで学習を完結できる |
 
 ---
 
@@ -282,34 +244,37 @@ mcp/
 
 | リスク | 対策 |
 |--------|------|
-| Colab 無料枠の不安定さ | 安定化ノートブック利用 / Pro 検討 |
-| MEGA API の不安定さ | リトライ実装 / 将来 GCS へ切替可能に設計 |
-| 人の写り込みノイズ | 将来 SAM 等でマスク（非ゴール） |
+| Colab 無料枠の不安定さ | 安定化ノートブック / Pro / 枚数・解像度を落とす |
+| COLMAP 失敗 | CPU モード、リサイズ、枚数削減 |
+| R2 認証の扱い | シークレット管理、将来 presign |
+| 人の写り込みノイズ | 将来 SAM 等（非ゴール） |
 | 写真の角度不足 | 投稿ガイド・最低枚数の案内 |
-| R2 / MEGA 認証漏洩 | `.env` 管理、Git にコミットしない |
+| 公開アップロードの悪用 | レート制限・認証（本番前） |
 
 ---
 
-## 12. ロードマップ（概略）
+## 12. ロードマップ
 
 ### Phase 0 — 基盤
 - [x] リポジトリ初期化
-- [ ] PRD 確定
-- [ ] R2 バケット作成
-- [ ] 写真アップロード API / UI 最小実装
+- [x] PRD
+- [x] 写真アップロード API / UI 最小実装
+- [ ] R2 バケット作成（運用者が実施）
+- [ ] `wrangler deploy` で本番公開
 
 ### Phase 1 — 学習パイプライン
-- [ ] ローカル MCP 実装
-- [ ] Colab テンプレート整備
-- [ ] 手動で 1 回の 3DGS 学習完走
+- [x] Colab テンプレート（R2 直取得）
+- [x] 手順書 `docs/colab-r2-3dgs.md`
+- [ ] 実データで 1 回の 3DGS 学習完走
+- [ ] （任意）Workers に presign API
 
 ### Phase 2 — ビューア
 - [ ] JS ビューア組み込み
-- [ ] R2 のモデルを配信
+- [ ] R2 `models/` から配信
 
 ### Phase 3 — 改善
-- [ ] バッチ選択ロジック（日付・品質）
-- [ ] 一時ストレージを GCS に切替可能に
+- [ ] バッチ選択（日付・最新 N 枚）
+- [ ] 投稿の認証・レート制限
 - [ ] 投稿体験の改善
 
 ---
@@ -320,7 +285,7 @@ mcp/
 - [gsplat.js](https://github.com/huggingface/gsplat.js)
 - [3DGS Colab Free T4](https://github.com/tianxingleo/3DGS-Colab-Free-T4)
 - [Cloudflare R2 Docs](https://developers.cloudflare.com/r2/)
-- [FastMCP](https://github.com/jlowin/fastmcp)
+- 本リポジトリ: [docs/colab-r2-3dgs.md](./docs/colab-r2-3dgs.md) / [docs/setup-r2.md](./docs/setup-r2.md)
 
 ---
 
@@ -330,6 +295,5 @@ mcp/
 |------|------|
 | 3DGS | 3D Gaussian Splatting |
 | COLMAP | Structure-from-Motion / MVS ツール |
-| R2 | Cloudflare のオブジェクトストレージ |
-| MCP | Model Context Protocol |
-| バッチ | 1回の学習に使う写真セット |
+| R2 | Cloudflare のオブジェクトストレージ（本プロジェクトの永続置き場） |
+| バッチ | 1回の学習に使う写真セット（R2 上の prefix + 枚数で指定） |
