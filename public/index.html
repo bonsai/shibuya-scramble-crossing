@@ -24,21 +24,14 @@
       color: var(--text);
       padding: 24px;
     }
-    main {
-      max-width: 720px;
-      margin: 0 auto;
-    }
+    main { max-width: 720px; margin: 0 auto; }
     h1 {
       font-size: 1.5rem;
       font-weight: 700;
       letter-spacing: -0.02em;
       margin: 0 0 4px;
     }
-    .sub {
-      color: var(--muted);
-      font-size: 0.95rem;
-      margin-bottom: 28px;
-    }
+    .sub { color: var(--muted); font-size: 0.95rem; margin-bottom: 28px; }
     .card {
       background: var(--card);
       border: 1px solid var(--border);
@@ -58,10 +51,7 @@
       border-color: var(--accent);
       background: rgba(255, 77, 109, 0.06);
     }
-    .drop.busy {
-      pointer-events: none;
-      opacity: 0.7;
-    }
+    .drop.busy { pointer-events: none; opacity: 0.7; }
     .drop p { margin: 8px 0 0; color: var(--muted); font-size: 0.9rem; }
     input[type="file"] { display: none; }
     #status {
@@ -91,9 +81,52 @@
       margin-top: 4px;
       word-break: break-all;
     }
-    h2 {
-      font-size: 1.05rem;
-      margin: 0 0 12px;
+    h2 { font-size: 1.05rem; margin: 0 0 12px; }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #1e1e28;
+      color: var(--text);
+      font-weight: 600;
+      padding: 8px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: transparent;
+      color: #fff;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    #colabInfo, #colabLog {
+      font-size: 0.85rem;
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    #colabLog {
+      max-height: 180px;
+      overflow: auto;
+      background: #0e0e14;
+      border-radius: 8px;
+      padding: 10px;
+      margin-top: 8px;
+      border: 1px solid var(--border);
+    }
+    label.chk {
+      font-size: 0.85rem;
+      color: var(--muted);
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
     }
   </style>
 </head>
@@ -112,6 +145,21 @@
     </section>
 
     <section class="card">
+      <h2>Colab バッチ</h2>
+      <div id="colabInfo">トンネル未登録</div>
+      <div class="row" style="margin-top:12px">
+        <button type="button" id="btnStatus">状態</button>
+        <button type="button" class="primary" id="btnBatch">バッチ開始</button>
+        <button type="button" id="btnDry">dry-run</button>
+        <button type="button" id="btnStop">停止</button>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="optForce" /> force</label>
+      </div>
+      <div id="colabLog"></div>
+    </section>
+
+    <section class="card">
       <h2>最近の投稿</h2>
       <div class="grid" id="list"></div>
     </section>
@@ -122,6 +170,8 @@
     const fileInput = document.getElementById("file");
     const statusEl = document.getElementById("status");
     const listEl = document.getElementById("list");
+    const colabInfo = document.getElementById("colabInfo");
+    const colabLog = document.getElementById("colabLog");
 
     function setStatus(msg, type = "") {
       statusEl.textContent = msg;
@@ -134,11 +184,8 @@
         setStatus("画像ファイルを選んでください", "err");
         return;
       }
-
       drop.classList.add("busy");
-      let ok = 0;
-      let fail = 0;
-
+      let ok = 0, fail = 0;
       for (const file of list) {
         setStatus(`送信中… ${ok + fail + 1}/${list.length}`);
         const form = new FormData();
@@ -153,7 +200,6 @@
           console.error(e);
         }
       }
-
       setStatus(
         fail === 0 ? `${ok} 枚完了` : `${ok} 成功 / ${fail} 失敗`,
         fail === 0 ? "ok" : "err"
@@ -176,7 +222,6 @@
       drop.classList.remove("dragover");
       if (e.dataTransfer.files?.length) uploadFiles(e.dataTransfer.files);
     });
-
     fileInput.addEventListener("change", () => {
       if (fileInput.files?.length) uploadFiles(fileInput.files);
     });
@@ -203,12 +248,81 @@
           wrap.append(img, meta);
           listEl.appendChild(wrap);
         }
-      } catch (e) {
+      } catch {
         listEl.innerHTML = "<p class=\"meta\">一覧の取得に失敗しました</p>";
       }
     }
 
+    async function loadColabInfo() {
+      try {
+        const res = await fetch("/api/colab");
+        const data = await res.json();
+        if (!data.registered) {
+          colabInfo.textContent = "トンネル未登録 — Colab で tunnel_server.py を起動";
+          return;
+        }
+        colabInfo.textContent = `registered ${data.registered_at || ""}\n${data.tunnel_url}`;
+      } catch {
+        colabInfo.textContent = "Colab 情報の取得に失敗";
+      }
+    }
+
+    async function refreshColabStatus() {
+      try {
+        const res = await fetch("/api/colab/status");
+        const data = await res.json();
+        if (data.error) {
+          colabLog.textContent = data.error + (data.detail ? "\n" + data.detail : "");
+          return;
+        }
+        const lines = [
+          `status: ${data.status || "?"}`,
+          data.message || "",
+          data.started_at ? `started: ${data.started_at}` : "",
+          data.finished_at ? `finished: ${data.finished_at}` : "",
+          "",
+          ...(data.log_tail || []),
+        ].filter(Boolean);
+        colabLog.textContent = lines.join("\n");
+      } catch (e) {
+        colabLog.textContent = String(e);
+      }
+    }
+
+    async function startBatch(extra = {}) {
+      const body = {
+        force: document.getElementById("optForce").checked,
+        ...extra,
+      };
+      colabLog.textContent = "starting...";
+      try {
+        const res = await fetch("/api/colab/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        colabLog.textContent = JSON.stringify(data, null, 2);
+        setTimeout(refreshColabStatus, 1500);
+      } catch (e) {
+        colabLog.textContent = String(e);
+      }
+    }
+
+    document.getElementById("btnStatus").onclick = () => {
+      loadColabInfo();
+      refreshColabStatus();
+    };
+    document.getElementById("btnBatch").onclick = () => startBatch();
+    document.getElementById("btnDry").onclick = () => startBatch({ dry_run: true });
+    document.getElementById("btnStop").onclick = async () => {
+      const res = await fetch("/api/colab/stop", { method: "POST" });
+      colabLog.textContent = await res.text();
+      setTimeout(refreshColabStatus, 800);
+    };
+
     loadList();
+    loadColabInfo();
   </script>
 </body>
 </html>
