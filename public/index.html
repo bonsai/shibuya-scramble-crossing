@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shibuya Scramble — 写真アップロード</title>
+  <style>
+    :root {
+      --bg: #0b0b0f;
+      --card: #16161d;
+      --text: #f2f2f5;
+      --muted: #9a9aab;
+      --accent: #ff4d6d;
+      --border: #2a2a35;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 20% -10%, #2a1020 0%, transparent 50%),
+                  radial-gradient(800px 400px at 100% 0%, #1a2035 0%, transparent 45%),
+                  var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 4px;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-bottom: 28px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .drop {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 36px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .drop:hover, .drop.dragover {
+      border-color: var(--accent);
+      background: rgba(255, 77, 109, 0.06);
+    }
+    .drop p { margin: 8px 0 0; color: var(--muted); font-size: 0.9rem; }
+    input[type="file"] { display: none; }
+    button {
+      appearance: none;
+      border: none;
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+      padding: 10px 18px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .actions {
+      margin-top: 16px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    #status {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    #status.ok { color: #4ade80; }
+    #status.err { color: #f87171; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 10px;
+    }
+    .thumb {
+      aspect-ratio: 1;
+      object-fit: cover;
+      width: 100%;
+      border-radius: 10px;
+      background: #111;
+      border: 1px solid var(--border);
+    }
+    .meta {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 4px;
+      word-break: break-all;
+    }
+    h2 {
+      font-size: 1.05rem;
+      margin: 0 0 12px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>渋谷スクランブル交差点</h1>
+    <p class="sub">写真を投稿して 3DGS 再構築に参加する</p>
+
+    <section class="card">
+      <div class="drop" id="drop">
+        <strong>クリック or ドラッグ＆ドロップ</strong>
+        <p>JPEG / PNG / WebP ・ 最大 15MB</p>
+      </div>
+      <input type="file" id="file" accept="image/jpeg,image/png,image/webp" multiple />
+      <div class="actions">
+        <button id="uploadBtn" disabled>アップロード</button>
+        <span id="status"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>最近の投稿</h2>
+      <div class="grid" id="list"></div>
+    </section>
+  </main>
+
+  <script>
+    const drop = document.getElementById("drop");
+    const fileInput = document.getElementById("file");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const statusEl = document.getElementById("status");
+    const listEl = document.getElementById("list");
+
+    let selected = [];
+
+    function setStatus(msg, type = "") {
+      statusEl.textContent = msg;
+      statusEl.className = type;
+    }
+
+    drop.addEventListener("click", () => fileInput.click());
+    drop.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      drop.classList.add("dragover");
+    });
+    drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("dragover");
+      if (e.dataTransfer.files?.length) {
+        selected = [...e.dataTransfer.files];
+        uploadBtn.disabled = selected.length === 0;
+        setStatus(`${selected.length} 枚選択中`);
+      }
+    });
+
+    fileInput.addEventListener("change", () => {
+      selected = [...fileInput.files];
+      uploadBtn.disabled = selected.length === 0;
+      setStatus(selected.length ? `${selected.length} 枚選択中` : "");
+    });
+
+    uploadBtn.addEventListener("click", async () => {
+      if (!selected.length) return;
+      uploadBtn.disabled = true;
+      let ok = 0;
+      let fail = 0;
+
+      for (const file of selected) {
+        setStatus(`アップロード中… ${ok + fail + 1}/${selected.length}`);
+        const form = new FormData();
+        form.append("file", file);
+        try {
+          const res = await fetch("/api/upload", { method: "POST", body: form });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || res.statusText);
+          ok++;
+        } catch (e) {
+          fail++;
+          console.error(e);
+        }
+      }
+
+      setStatus(
+        fail === 0 ? `${ok} 枚アップロード完了` : `${ok} 成功 / ${fail} 失敗`,
+        fail === 0 ? "ok" : "err"
+      );
+      selected = [];
+      fileInput.value = "";
+      uploadBtn.disabled = true;
+      loadList();
+    });
+
+    async function loadList() {
+      try {
+        const res = await fetch("/api/photos?limit=24");
+        const data = await res.json();
+        listEl.innerHTML = "";
+        if (!data.objects?.length) {
+          listEl.innerHTML = "<p class=\"meta\">まだ写真がありません</p>";
+          return;
+        }
+        for (const o of data.objects) {
+          const wrap = document.createElement("div");
+          const img = document.createElement("img");
+          img.className = "thumb";
+          img.loading = "lazy";
+          img.src = o.url;
+          img.alt = o.key;
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = o.key.split("/").pop();
+          wrap.append(img, meta);
+          listEl.appendChild(wrap);
+        }
+      } catch (e) {
+        listEl.innerHTML = "<p class=\"meta\">一覧の取得に失敗しました</p>";
+      }
+    }
+
+    loadList();
+  </script>
+</body>
+</html>

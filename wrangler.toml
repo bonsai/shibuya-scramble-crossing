@@ -1,0 +1,13 @@
+name = "shibuya-scramble-crossing"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# R2 バケットをバインド（ダッシュボードまたは wrangler r2 bucket create 後に名前を合わせる）
+[[r2_buckets]]
+binding = "PHOTOS"
+bucket_name = "shibuya-scramble"
+
+# 静的アセット（アップロード UI）
+[assets]
+directory = "./public"
+binding = "ASSETS"
