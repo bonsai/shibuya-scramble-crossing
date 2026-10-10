@@ -5,9 +5,30 @@
 - **PC**: 3DGS の街  
 - **スマホ**: 軽いポリゴンの街  
 - **人**: 立体化せず、写真を空間に浮かせる  
-- **データ**: Cloudflare R2 → Colab で学習
+- **データ**: Cloudflare R2 → Colab / Kaggle で学習
 
 進捗は **[Issues](https://github.com/bonsai/shibuya-scramble-crossing/issues)**。
+
+## アーキテクチャ（ハイブリッド方針）
+
+「JS のみ」の制約を守りつつ、本格的な 3DGS 学習は GPU 環境に任せる。
+
+1. **Cloudflare側（JS のみ）**
+   - 写真投稿受付
+   - R2 に保存
+   - メタデータ管理・簡易解析
+   - 十分集まったら「写真セットをエクスポート」
+
+2. **Colab / Kaggle側（GPU）**
+   - エクスポートした写真群を読み込む
+   - COLMAP → 3DGS（gsplat / nerfstudio など）で構築
+   - できた `.ply` / `.splat` をダウンロード
+
+3. **再度 Cloudflare側**
+   - 構築結果をアップロード
+   - JS の 3DGS ビューアで公開
+
+この分割により、エッジ環境では回せない重い学習を避けつつ、本番の 3DGS を実現できる。
 
 ## フォルダ
 
