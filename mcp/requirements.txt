@@ -1,0 +1,4 @@
+# Optional local MCP — not required for Colab ↔ R2 path
+# fastmcp>=2.0.0
+# boto3>=1.34.0
+# python-dotenv>=1.0.0
