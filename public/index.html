@@ -58,33 +58,17 @@
       border-color: var(--accent);
       background: rgba(255, 77, 109, 0.06);
     }
+    .drop.busy {
+      pointer-events: none;
+      opacity: 0.7;
+    }
     .drop p { margin: 8px 0 0; color: var(--muted); font-size: 0.9rem; }
     input[type="file"] { display: none; }
-    button {
-      appearance: none;
-      border: none;
-      background: var(--accent);
-      color: white;
-      font-weight: 600;
-      padding: 10px 18px;
-      border-radius: 10px;
-      cursor: pointer;
-      font-size: 0.95rem;
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    .actions {
-      margin-top: 16px;
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
     #status {
+      margin-top: 14px;
       font-size: 0.9rem;
       color: var(--muted);
+      min-height: 1.2em;
     }
     #status.ok { color: #4ade80; }
     #status.err { color: #f87171; }
@@ -116,18 +100,15 @@
 <body>
   <main>
     <h1>渋谷スクランブル交差点</h1>
-    <p class="sub">写真を投稿して 3DGS 再構築に参加する</p>
+    <p class="sub">写真を選ぶだけで投稿（JPEG / PNG / WebP ・最大 15MB）</p>
 
     <section class="card">
       <div class="drop" id="drop">
-        <strong>クリック or ドラッグ＆ドロップ</strong>
-        <p>JPEG / PNG / WebP ・ 最大 15MB</p>
+        <strong>クリック or ドロップですぐ送信</strong>
+        <p>複数枚 OK</p>
       </div>
       <input type="file" id="file" accept="image/jpeg,image/png,image/webp" multiple />
-      <div class="actions">
-        <button id="uploadBtn" disabled>アップロード</button>
-        <span id="status"></span>
-      </div>
+      <div id="status"></div>
     </section>
 
     <section class="card">
@@ -139,47 +120,27 @@
   <script>
     const drop = document.getElementById("drop");
     const fileInput = document.getElementById("file");
-    const uploadBtn = document.getElementById("uploadBtn");
     const statusEl = document.getElementById("status");
     const listEl = document.getElementById("list");
-
-    let selected = [];
 
     function setStatus(msg, type = "") {
       statusEl.textContent = msg;
       statusEl.className = type;
     }
 
-    drop.addEventListener("click", () => fileInput.click());
-    drop.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      drop.classList.add("dragover");
-    });
-    drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
-    drop.addEventListener("drop", (e) => {
-      e.preventDefault();
-      drop.classList.remove("dragover");
-      if (e.dataTransfer.files?.length) {
-        selected = [...e.dataTransfer.files];
-        uploadBtn.disabled = selected.length === 0;
-        setStatus(`${selected.length} 枚選択中`);
+    async function uploadFiles(files) {
+      const list = [...files].filter((f) => f.type.startsWith("image/"));
+      if (!list.length) {
+        setStatus("画像ファイルを選んでください", "err");
+        return;
       }
-    });
 
-    fileInput.addEventListener("change", () => {
-      selected = [...fileInput.files];
-      uploadBtn.disabled = selected.length === 0;
-      setStatus(selected.length ? `${selected.length} 枚選択中` : "");
-    });
-
-    uploadBtn.addEventListener("click", async () => {
-      if (!selected.length) return;
-      uploadBtn.disabled = true;
+      drop.classList.add("busy");
       let ok = 0;
       let fail = 0;
 
-      for (const file of selected) {
-        setStatus(`アップロード中… ${ok + fail + 1}/${selected.length}`);
+      for (const file of list) {
+        setStatus(`送信中… ${ok + fail + 1}/${list.length}`);
         const form = new FormData();
         form.append("file", file);
         try {
@@ -194,13 +155,30 @@
       }
 
       setStatus(
-        fail === 0 ? `${ok} 枚アップロード完了` : `${ok} 成功 / ${fail} 失敗`,
+        fail === 0 ? `${ok} 枚完了` : `${ok} 成功 / ${fail} 失敗`,
         fail === 0 ? "ok" : "err"
       );
-      selected = [];
       fileInput.value = "";
-      uploadBtn.disabled = true;
+      drop.classList.remove("busy");
       loadList();
+    }
+
+    drop.addEventListener("click", () => {
+      if (!drop.classList.contains("busy")) fileInput.click();
+    });
+    drop.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      drop.classList.add("dragover");
+    });
+    drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("dragover");
+      if (e.dataTransfer.files?.length) uploadFiles(e.dataTransfer.files);
+    });
+
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files?.length) uploadFiles(fileInput.files);
     });
 
     async function loadList() {
