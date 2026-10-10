@@ -1,0 +1,43 @@
+# Shibuya Scramble Crossing — 3DGS バッチ設定
+#
+# 優先順位: CLI引数 > 環境変数 > この YAML > スクリプト内デフォルト
+# Colab 例: !python batch_3dgs.py --config /content/batch_config.yaml
+
+r2:
+  bucket: shibuya-scramble
+  prefix: "photos/"          # 対象プレフィックス（日付絞りなら photos/2026-10-11/ など）
+  # account_id / keys は環境変数で渡す（Git に書かない）
+
+# ---- 閾値（バッチ起動判定） ----
+thresholds:
+  min_images: 80             # これ未満で中止
+  max_images: 150            # 学習に使う上限枚数
+  # 以下は未来拡張用（現在スクリプトでは未使用）
+  # min_new_since_last: 30   # 前回バッチからの追加枚数
+  # require_time_diversity: false
+
+# ---- ワークフロー ----
+workflow:
+  force: false               # true = 枚数条件を無視して実行
+  dry_run: false             # true = 判定だけ
+  skip_train: false          # true = ダウンロードまで（学習しない）
+  upload_ply: true           # 完了後 .ply を R2 へ戻す
+  iterations: 15000          # 3DGS 学習イテレーション数
+  save_iterations:           # 中間保存するイテレーション
+    - 7000
+    - 15000
+
+# ---- パス ----
+paths:
+  data_dir: /content/data
+  output_dir: /content/output
+  gs_repo: /content/gaussian-splatting
+  ply_r2_prefix: "models/city_gs/"   # アップロード先プレフィックス
+
+# ---- 画像 ----
+images:
+  extensions:
+    - .jpg
+    - .jpeg
+    - .png
+    - .webp
