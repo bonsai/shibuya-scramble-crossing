@@ -9,54 +9,34 @@
 
 進捗は **[Issues](https://github.com/bonsai/shibuya-scramble-crossing/issues)**。
 
-## アーキテクチャ（ハイブリッド方針）
+## 設計ドキュメント（実装契約）
 
-「JS のみ」の制約を守りつつ、本格的な 3DGS 学習は GPU 環境に任せる。
+外部エージェント（Jules 等）に委託するときは、Issue 本文より **先にここを読む**。
 
-1. **Cloudflare側（JS のみ）**
-   - 写真投稿受付
-   - R2 に保存
-   - メタデータ管理・簡易解析
-   - 十分集まったら「写真セットをエクスポート」
+| Doc | 内容 |
+|------|------|
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 全体構成・制約・リポマップ |
+| [docs/PLACEMENTS.md](./docs/PLACEMENTS.md) | COLMAP pose → placements JSON |
+| [docs/MODEL_SWITCHING.md](./docs/MODEL_SWITCHING.md) | `latest.json` ・ステージ切替 |
+| [docs/COLAB_TUNNEL.md](./docs/COLAB_TUNNEL.md) | CF UI ↔ Colab トンネル |
 
-2. **Colab / Kaggle側（GPU）**
-   - エクスポートした写真群を読み込む
-   - COLMAP → 3DGS（gsplat / nerfstudio など）で構築
-   - できた `.ply` / `.splat` をダウンロード
+## アーキテクチャ（ハイブリッド）
 
-3. **再度 Cloudflare側**
-   - 構築結果をアップロード
-   - JS の 3DGS ビューアで公開
-
-この分割により、エッジ環境では回せない重い学習を避けつつ、本番の 3DGS を実現できる。
+1. **Cloudflare（JS のみ）** … 投稿・R2・プロキシ・配信  
+2. **Colab / Kaggle（GPU）** … COLMAP + 3DGS  
+3. **ビューア（JS）** … PC=3DGS / モバイル=GLB + 写真パネル  
 
 ## フォルダ
 
 | パス | 役割 |
 |------|------|
-| `src/` | Cloudflare Workers（投稿 API） |
-| `public/` | 投稿 UI |
-| `api/` | API 仕様メモ・クライアント向け |
-| `mcp/` | ローカル MCP（任意・運用支援） |
-| `colab/` | R2→3DGS 学習ノートブック |
+| `src/` | Cloudflare Workers |
+| `public/` | 投稿 UI + Colab 操作 |
+| `colab/` | バッチ・トンネル・YAML |
+| `docs/` | 設計契約 |
+| `api/` | API メモ |
+| `mcp/` | 任意 MCP |
 
 ```bash
 npm install && npm run dev
 ```
-
-## Colab の結果（何ができるか）
-
-`colab/r2_3dgs_template.ipynb` を最後まで通すと、だいたい次が出る。
-
-| 成果物 | 場所の例 | 意味 |
-|--------|----------|------|
-| 学習用に並べた画像 | `/content/data/input/0001.jpg` … | R2 から落とした写真 |
-| COLMAP のカメラ情報 | `sparse/0/` など | 各写真の位置・向き |
-| **点群モデル** | `.../point_cloud/iteration_*/point_cloud.ply` | **街の 3DGS 本体** |
-
-- **成功の目安**: `.ply` が1つできて、ビューアで建物・地面が分かること  
-- **人**はにじんでも無視してよい（人はあとから写真パネルで載せる）  
-- その `.ply` を PC 用の街 `models/city_gs/` に置く想定  
-- スマホ用は Colab では作らない（別途 GLB）
-
-詳細手順・チェックリストは Issue（Epic B）へ。
