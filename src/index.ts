@@ -64,6 +64,19 @@ function extFromType(type: string): string {
   return "jpg";
 }
 
+function isAllowedKey(key: string | null | undefined, prefix: string): boolean {
+  if (typeof key !== "string" || !key) {
+    return false;
+  }
+  return (
+    key.startsWith(prefix) &&
+    !key.includes("..") &&
+    !key.startsWith("/") &&
+    !key.includes("\\") &&
+    !key.includes("\0")
+  );
+}
+
 type ColabMeta = {
   tunnel_url: string;
   token?: string | null;
@@ -323,19 +336,12 @@ async function handleGetLatestModel(url: URL, env: Env): Promise<Response> {
 // docs/MODEL_SWITCHING.md
 async function handleGetModelObject(url: URL, env: Env): Promise<Response> {
   const key = url.searchParams.get("key");
-  if (
-    !key ||
-    !key.startsWith("models/") ||
-    key.includes("..") ||
-    key.startsWith("/") ||
-    key.includes("\\") ||
-    key.includes("\0")
-  ) {
+  if (!isAllowedKey(key, "models/")) {
     return json({ error: "Invalid key parameter" }, 400);
   }
 
   try {
-    const obj = await env.PHOTOS.get(key);
+    const obj = await env.PHOTOS.get(key!);
     if (!obj) {
       return json({ error: "Not found" }, 404);
     }
@@ -343,7 +349,12 @@ async function handleGetModelObject(url: URL, env: Env): Promise<Response> {
     const headers = new Headers();
     obj.writeHttpMetadata(headers);
     headers.set("etag", obj.httpEtag);
-    headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    // Mutable manifest files (latest.json) require revalidation so clients pick up new models, while versioned assets are immutable.
+    if (key!.endsWith("latest.json")) {
+      headers.set("Cache-Control", "no-cache");
+    } else {
+      headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    }
     Object.entries(corsHeaders()).forEach(([k, v]) => headers.set(k, v));
     return new Response(obj.body, { headers });
   } catch (err) {
@@ -378,12 +389,17 @@ async function handleGetPlacementsLatest(env: Env): Promise<Response> {
     let indexData: { export_key?: string | null };
     try {
       indexData = (await indexObj.json()) as { export_key?: string | null };
-    } catch {
-      return json({ error: "Not found" }, 404);
+    } catch (err) {
+      console.error("Failed to parse placements index JSON:", err);
+      return json({ error: "Failed to parse placements index" }, 500);
     }
 
     if (!indexData || typeof indexData.export_key !== "string" || !indexData.export_key) {
       return json({ error: "Not found" }, 404);
+    }
+
+    if (!isAllowedKey(indexData.export_key, "placements/")) {
+      return json({ error: "Invalid export_key in placements index" }, 400);
     }
 
     const exportObj = await env.PHOTOS.get(indexData.export_key);

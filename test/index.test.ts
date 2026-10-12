@@ -104,16 +104,28 @@ test("GET /api/models/object streams valid key under models/", async () => {
       body: "binary ply data",
       httpMetadata: { contentType: "application/octet-stream" },
     },
+    "models/city_gs/latest.json": {
+      body: JSON.stringify({ version: 1 }),
+      httpMetadata: { contentType: "application/json" },
+    },
   };
   const env: Env = { PHOTOS: createMockR2(store), ASSETS: {} as Fetcher };
-  const req = new Request("https://example.com/api/models/object?key=models/city_gs/20261011_120000_point_cloud.ply");
-  const res = await worker.fetch(req, env);
 
-  assert.strictEqual(res.status, 200);
-  assert.strictEqual(res.headers.get("content-type"), "application/octet-stream");
-  assert.ok(res.headers.get("cache-control")?.includes("max-age="));
-  const text = await res.text();
-  assert.strictEqual(text, "binary ply data");
+  // versioned asset key keeps a long-lived immutable cache
+  const req1 = new Request("https://example.com/api/models/object?key=models/city_gs/20261011_120000_point_cloud.ply");
+  const res1 = await worker.fetch(req1, env);
+  assert.strictEqual(res1.status, 200);
+  assert.strictEqual(res1.headers.get("content-type"), "application/octet-stream");
+  assert.strictEqual(res1.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  const text1 = await res1.text();
+  assert.strictEqual(text1, "binary ply data");
+
+  // mutable latest.json key must NOT be immutable (short revalidating cache, e.g. no-cache)
+  const req2 = new Request("https://example.com/api/models/object?key=models/city_gs/latest.json");
+  const res2 = await worker.fetch(req2, env);
+  assert.strictEqual(res2.status, 200);
+  assert.ok(!res2.headers.get("cache-control")?.includes("immutable"));
+  assert.strictEqual(res2.headers.get("cache-control"), "no-cache");
 });
 
 test("GET /api/models/object rejects invalid key -> 400 JSON", async () => {
@@ -221,16 +233,19 @@ test("GET /api/placements/latest missing index, export_key, or export object -> 
   assert.strictEqual(res1.status, 404);
   assert.strictEqual(res1.headers.get("content-type"), "application/json; charset=utf-8");
 
-  // Case 2: index missing export_key or null export_key
-  const env2: Env = {
-    PHOTOS: createMockR2({
-      "placements/index.json": { body: JSON.stringify({ version: 1, export_key: null }) },
-    }),
-    ASSETS: {} as Fetcher,
-  };
-  const res2 = await worker.fetch(new Request("https://example.com/api/placements/latest"), env2);
-  assert.strictEqual(res2.status, 404);
-  assert.strictEqual(res2.headers.get("content-type"), "application/json; charset=utf-8");
+  // Case 2: index missing export_key, null export_key, empty string, or non-string
+  const invalidKeys = [null, "", 123, undefined];
+  for (const exportKey of invalidKeys) {
+    const env2: Env = {
+      PHOTOS: createMockR2({
+        "placements/index.json": { body: JSON.stringify({ version: 1, export_key: exportKey }) },
+      }),
+      ASSETS: {} as Fetcher,
+    };
+    const res2 = await worker.fetch(new Request("https://example.com/api/placements/latest"), env2);
+    assert.strictEqual(res2.status, 404, `export_key=${String(exportKey)} should yield 404`);
+    assert.strictEqual(res2.headers.get("content-type"), "application/json; charset=utf-8");
+  }
 
   // Case 3: export object missing in R2
   const env3: Env = {
@@ -242,4 +257,67 @@ test("GET /api/placements/latest missing index, export_key, or export object -> 
   const res3 = await worker.fetch(new Request("https://example.com/api/placements/latest"), env3);
   assert.strictEqual(res3.status, 404);
   assert.strictEqual(res3.headers.get("content-type"), "application/json; charset=utf-8");
+});
+
+test("GET /api/placements/latest rejects export_key pointing at control/colab.json -> 400 and no secrets leaked", async () => {
+  const store = {
+    "placements/index.json": {
+      body: JSON.stringify({
+        version: 1,
+        export_key: "control/colab.json",
+      }),
+    },
+    "control/colab.json": {
+      body: JSON.stringify({
+        tunnel_url: "https://secret-tunnel.example.com",
+        token: "super-secret-token-12345",
+      }),
+    },
+  };
+  const env: Env = { PHOTOS: createMockR2(store), ASSETS: {} as Fetcher };
+  const req = new Request("https://example.com/api/placements/latest");
+  const res = await worker.fetch(req, env);
+
+  assert.strictEqual(res.status, 400);
+  assert.strictEqual(res.headers.get("content-type"), "application/json; charset=utf-8");
+  const text = await res.text();
+  assert.ok(!text.includes("super-secret-token-12345"));
+  assert.ok(!text.includes("secret-tunnel.example.com"));
+  const body = JSON.parse(text) as { error: string };
+  assert.ok(body.error);
+});
+
+test("GET /api/placements/latest rejects export_key with path traversal -> 400", async () => {
+  const store = {
+    "placements/index.json": {
+      body: JSON.stringify({
+        version: 1,
+        export_key: "placements/../control/colab.json",
+      }),
+    },
+  };
+  const env: Env = { PHOTOS: createMockR2(store), ASSETS: {} as Fetcher };
+  const req = new Request("https://example.com/api/placements/latest");
+  const res = await worker.fetch(req, env);
+
+  assert.strictEqual(res.status, 400);
+  assert.strictEqual(res.headers.get("content-type"), "application/json; charset=utf-8");
+  const body = await res.json() as { error: string };
+  assert.ok(body.error);
+});
+
+test("GET /api/placements/latest with corrupt placements/index.json -> 500 JSON", async () => {
+  const store = {
+    "placements/index.json": {
+      body: "invalid-json-{",
+    },
+  };
+  const env: Env = { PHOTOS: createMockR2(store), ASSETS: {} as Fetcher };
+  const req = new Request("https://example.com/api/placements/latest");
+  const res = await worker.fetch(req, env);
+
+  assert.strictEqual(res.status, 500);
+  assert.strictEqual(res.headers.get("content-type"), "application/json; charset=utf-8");
+  const body = await res.json() as { error: string };
+  assert.ok(body.error);
 });
