@@ -64,6 +64,19 @@ function extFromType(type: string): string {
   return "jpg";
 }
 
+function isAllowedKey(key: string | null | undefined, prefix: string): boolean {
+  if (typeof key !== "string" || !key) {
+    return false;
+  }
+  return (
+    key.startsWith(prefix) &&
+    !key.includes("..") &&
+    !key.startsWith("/") &&
+    !key.includes("\\") &&
+    !key.includes("\0")
+  );
+}
+
 type ColabMeta = {
   tunnel_url: string;
   token?: string | null;
@@ -145,6 +158,22 @@ export default {
       return handleGetPhoto(key, env);
     }
 
+    // docs/MODEL_SWITCHING.md
+    if (path === "/api/models/latest" && request.method === "GET") {
+      return handleGetLatestModel(url, env);
+    }
+    if (path === "/api/models/object" && request.method === "GET") {
+      return handleGetModelObject(url, env);
+    }
+
+    // docs/PLACEMENTS.md
+    if (path === "/api/placements" && request.method === "GET") {
+      return handleGetPlacementsIndex(env);
+    }
+    if (path === "/api/placements/latest" && request.method === "GET") {
+      return handleGetPlacementsLatest(env);
+    }
+
     // --- Colab tunnel ---
     if (path === "/api/colab/register" && request.method === "POST") {
       return handleColabRegister(request, env);
@@ -208,9 +237,9 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
     }
 
     const form = await request.formData();
-    const file = form.get("file");
+    const file = form.get("file") as File | null;
 
-    if (!file || !(file instanceof File)) {
+    if (!file || typeof file === "string" || !file.type) {
       return json({ error: "field 'file' is required" }, 400);
     }
     if (!ALLOWED_TYPES.has(file.type)) {
@@ -281,4 +310,107 @@ async function handleGetPhoto(key: string, env: Env): Promise<Response> {
   headers.set("Cache-Control", "public, max-age=86400");
   Object.entries(corsHeaders()).forEach(([k, v]) => headers.set(k, v));
   return new Response(obj.body, { headers });
+}
+
+// docs/MODEL_SWITCHING.md
+async function handleGetLatestModel(url: URL, env: Env): Promise<Response> {
+  const kind = url.searchParams.get("kind");
+  if (!kind || (kind !== "city_gs" && kind !== "city_glb")) {
+    return json({ error: "Invalid or missing kind parameter" }, 400);
+  }
+
+  try {
+    const key = `models/${kind}/latest.json`;
+    const obj = await env.PHOTOS.get(key);
+    if (!obj) {
+      return json({ error: "Not found" }, 404);
+    }
+    const data = await obj.json();
+    return json(data);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return json({ error: "Failed to fetch latest model", detail: message }, 500);
+  }
+}
+
+// docs/MODEL_SWITCHING.md
+async function handleGetModelObject(url: URL, env: Env): Promise<Response> {
+  const key = url.searchParams.get("key");
+  if (!isAllowedKey(key, "models/")) {
+    return json({ error: "Invalid key parameter" }, 400);
+  }
+
+  try {
+    const obj = await env.PHOTOS.get(key!);
+    if (!obj) {
+      return json({ error: "Not found" }, 404);
+    }
+
+    const headers = new Headers();
+    obj.writeHttpMetadata(headers);
+    headers.set("etag", obj.httpEtag);
+    // Mutable manifest files (latest.json) require revalidation so clients pick up new models, while versioned assets are immutable.
+    if (key!.endsWith("latest.json")) {
+      headers.set("Cache-Control", "no-cache");
+    } else {
+      headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    }
+    Object.entries(corsHeaders()).forEach(([k, v]) => headers.set(k, v));
+    return new Response(obj.body, { headers });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return json({ error: "Failed to stream model object", detail: message }, 500);
+  }
+}
+
+// docs/PLACEMENTS.md
+async function handleGetPlacementsIndex(env: Env): Promise<Response> {
+  try {
+    const obj = await env.PHOTOS.get("placements/index.json");
+    if (!obj) {
+      return json({ error: "Not found" }, 404);
+    }
+    const data = await obj.json();
+    return json(data);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return json({ error: "Failed to fetch placements index", detail: message }, 500);
+  }
+}
+
+// docs/PLACEMENTS.md
+async function handleGetPlacementsLatest(env: Env): Promise<Response> {
+  try {
+    const indexObj = await env.PHOTOS.get("placements/index.json");
+    if (!indexObj) {
+      return json({ error: "Not found" }, 404);
+    }
+
+    let indexData: { export_key?: string | null };
+    try {
+      indexData = (await indexObj.json()) as { export_key?: string | null };
+    } catch (err) {
+      console.error("Failed to parse placements index JSON:", err);
+      return json({ error: "Failed to parse placements index" }, 500);
+    }
+
+    if (!indexData || typeof indexData.export_key !== "string" || !indexData.export_key) {
+      return json({ error: "Not found" }, 404);
+    }
+
+    if (!isAllowedKey(indexData.export_key, "placements/")) {
+      return json({ error: "Invalid export_key in placements index" }, 400);
+    }
+
+    const exportObj = await env.PHOTOS.get(indexData.export_key);
+    if (!exportObj) {
+      return json({ error: "Not found" }, 404);
+    }
+
+    const data = await exportObj.json();
+    return json(data);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return json({ error: "Failed to fetch latest placements", detail: message }, 500);
+  }
 }
