@@ -1,11 +1,11 @@
-// docs/MODEL_SWITCHING.md
+// docs/MODEL_SWITCHING.md — Epic E+F issue #18 stage loading
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { createPlaceholderCity } from './placeholder.js';
 
 /**
  * Loads the mobile city GLB model or falls back to the procedural placeholder city.
  * 
- * @returns {Promise<{ object: THREE.Object3D, source: string, assetKey: string|null, statusMsg: string }>}
+ * @returns {Promise<{ object: THREE.Object3D, source: string, assetKey: string|null, statusMsg: string, dispose?: () => void }>}
  */
 export async function loadGlbStage() {
   try {

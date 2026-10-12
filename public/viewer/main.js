@@ -1,11 +1,12 @@
-// docs/MODEL_SWITCHING.md
+// docs/MODEL_SWITCHING.md — Epic E+F issue #18 step2/step3 stage switching & dispatch
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { loadGlbStage } from './stage-glb.js';
-import { createPlaceholderCity } from './placeholder.js';
+import { loadSplatStage } from './stage-splat.js';
 
 /**
  * Resolves the stage kind based on URL search parameters and device type.
+ * Priority precedence: manual override parameter or URL searchParams `stage` (if valid city_gs | city_glb) > isMobile device check.
  * docs/MODEL_SWITCHING.md verbatim logic.
  *
  * @param {URLSearchParams|Object} searchParams
@@ -38,6 +39,42 @@ export function checkIsMobile() {
   return isMobileUA || isSmallScreen;
 }
 
+/**
+ * Recursively disposes GPU resources (geometries, materials, textures) from a Three.js object hierarchy.
+ * @param {THREE.Object3D} object
+ */
+export function disposeObjectTree(object) {
+  if (!object) return;
+
+  object.traverse((child) => {
+    if (child.geometry) {
+      child.geometry.dispose();
+    }
+    if (child.material) {
+      if (Array.isArray(child.material)) {
+        child.material.forEach((mat) => disposeMaterial(mat));
+      } else {
+        disposeMaterial(child.material);
+      }
+    }
+  });
+}
+
+/**
+ * Helper to dispose material and its attached textures.
+ * @param {THREE.Material} material
+ */
+function disposeMaterial(material) {
+  if (!material) return;
+  Object.keys(material).forEach((prop) => {
+    const val = material[prop];
+    if (val && typeof val === 'object' && typeof val.dispose === 'function' && val.isTexture) {
+      val.dispose();
+    }
+  });
+  material.dispose();
+}
+
 export async function initViewer() {
   const canvas = document.getElementById('viewer-canvas');
   if (!canvas) return;
@@ -46,6 +83,7 @@ export async function initViewer() {
   const hudSource = document.getElementById('hud-source');
   const hudAsset = document.getElementById('hud-asset');
   const hudStatus = document.getElementById('hud-status');
+  const stageSelect = document.getElementById('stage-select');
 
   // 1. Setup Three.js Scene, Camera, Renderer
   const scene = new THREE.Scene();
@@ -82,33 +120,90 @@ export async function initViewer() {
   dirLight.castShadow = true;
   scene.add(dirLight);
 
-  // 4. Resolve Stage Kind
-  const urlParams = new URLSearchParams(window.location.search);
-  const isMobile = checkIsMobile();
-  const kind = resolveKind(urlParams, isMobile);
+  // Stage state tracking
+  let currentStageObject = null;
+  let currentStageDispose = null;
+  let loadSessionId = 0;
 
-  if (hudKind) hudKind.textContent = kind;
+  // Helper to load and mount stage
+  // Precedence order: Manual UI Select (> 'auto') > URL override (`?stage=`) > Device auto-detection (`resolveKind`).
+  async function switchStage(forcedKind) {
+    const thisSession = ++loadSessionId;
 
-  let loadedStageObject = null;
+    // Dispose old stage GPU resources cleanly
+    if (currentStageObject) {
+      scene.remove(currentStageObject);
+      disposeObjectTree(currentStageObject);
+      currentStageObject = null;
+    }
+    if (typeof currentStageDispose === 'function') {
+      try {
+        currentStageDispose();
+      } catch (e) {
+        console.warn('Error during stage disposal:', e);
+      }
+      currentStageDispose = null;
+    }
 
-  if (kind === 'city_gs') {
-    // 3DGS path is not implemented in this skeleton
-    if (hudStatus) hudStatus.textContent = '3DGS 未実装（プレースホルダーを表示中）';
-    if (hudSource) hudSource.textContent = 'プレースホルダー (生成街)';
+    const urlParams = new URLSearchParams(window.location.search);
+    const isMobile = checkIsMobile();
+
+    // Determine target kind based on precedence
+    let targetKind;
+    if (forcedKind === 'city_gs' || forcedKind === 'city_glb') {
+      targetKind = forcedKind;
+    } else {
+      targetKind = resolveKind(urlParams, isMobile);
+    }
+
+    if (hudKind) hudKind.textContent = targetKind;
+    if (hudSource) hudSource.textContent = 'ロード中…';
     if (hudAsset) hudAsset.textContent = '-';
+    if (hudStatus) hudStatus.textContent = 'ステージ読み込み中…';
 
-    loadedStageObject = createPlaceholderCity();
-    scene.add(loadedStageObject);
-  } else {
-    // city_glb path
-    const stageResult = await loadGlbStage();
-    loadedStageObject = stageResult.object;
-    scene.add(loadedStageObject);
+    let stageResult;
+    if (targetKind === 'city_gs') {
+      stageResult = await loadSplatStage(camera, renderer);
+    } else {
+      stageResult = await loadGlbStage();
+    }
+
+    // Ignore stale async completions if another stage switch occurred
+    if (thisSession !== loadSessionId) {
+      if (stageResult?.object) {
+        disposeObjectTree(stageResult.object);
+        if (typeof stageResult.dispose === 'function') stageResult.dispose();
+      }
+      return;
+    }
+
+    currentStageObject = stageResult.object;
+    currentStageDispose = stageResult.dispose || null;
+    scene.add(currentStageObject);
 
     if (hudSource) hudSource.textContent = stageResult.source;
     if (hudAsset) hudAsset.textContent = stageResult.assetKey || '-';
     if (hudStatus) hudStatus.textContent = stageResult.statusMsg;
   }
+
+  // Bind HUD dropdown selector if present
+  if (stageSelect) {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlStage = urlParams.get('stage');
+    if (urlStage === 'city_gs' || urlStage === 'city_glb') {
+      stageSelect.value = urlStage;
+    } else {
+      stageSelect.value = 'auto';
+    }
+
+    stageSelect.addEventListener('change', (e) => {
+      const val = e.target.value;
+      switchStage(val === 'auto' ? null : val);
+    });
+  }
+
+  // Initial stage load
+  await switchStage(null);
 
   // Handle window resizing
   window.addEventListener('resize', () => {
