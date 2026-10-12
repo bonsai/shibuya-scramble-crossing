@@ -22,6 +22,8 @@ workflow:
   dry_run: false             # true = 判定だけ
   skip_train: false          # true = ダウンロードまで（学習しない）
   upload_ply: true           # 完了後 .ply を R2 へ戻す
+  export_latest: true        # 完了後 models/city_gs/latest.json を更新 (update_latest と同義)
+  export_placements: true    # COLMAP 姿勢から placements/*.json と index.json をエクスポート
   iterations: 15000          # 3DGS 学習イテレーション数
   save_iterations:           # 中間保存するイテレーション
     - 7000

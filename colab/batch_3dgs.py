@@ -43,6 +43,8 @@ DEFAULTS: dict[str, Any] = {
         "dry_run": False,
         "skip_train": False,
         "upload_ply": True,
+        "export_latest": True,
+        "export_placements": True,
         "iterations": 15000,
         "save_iterations": [7000, 15000],
     },
@@ -119,6 +121,12 @@ def apply_env_overrides(cfg: dict) -> dict:
         wf["force"] = v
     if (v := env_bool("UPLOAD_PLY")) is not None:
         wf["upload_ply"] = v
+    if (v := env_bool("EXPORT_LATEST")) is not None:
+        wf["export_latest"] = v
+    elif (v := env_bool("UPDATE_LATEST")) is not None:
+        wf["export_latest"] = v
+    if (v := env_bool("EXPORT_PLACEMENTS")) is not None:
+        wf["export_placements"] = v
     if (v := env_int("ITERATIONS")) is not None:
         wf["iterations"] = v
 
@@ -213,20 +221,34 @@ def decide_batch(n: int, min_images: int, force: bool) -> tuple[bool, str]:
 def download_photos(
     s3, bucket: str, keys: list[str], dest_dir: Path, max_images: int
 ) -> int:
+    import json
+
     dest_dir.mkdir(parents=True, exist_ok=True)
     for p in dest_dir.glob("*"):
         if p.is_file():
             p.unlink()
 
     selected = keys[:max_images]
+    key_map: dict[str, str] = {}
     for i, key in enumerate(selected, 1):
         ext = Path(key).suffix.lower() or ".jpg"
         if ext == ".jpeg":
             ext = ".jpg"
-        dest = dest_dir / f"{i:04d}{ext}"
+        local_name = f"{i:04d}{ext}"
+        dest = dest_dir / local_name
         s3.download_file(bucket, key, str(dest))
+        key_map[local_name] = key
         if i % 20 == 0 or i == len(selected):
             print(f"  download {i}/{len(selected)}")
+
+    map_path = dest_dir / "r2_key_map.json"
+    with map_path.open("w", encoding="utf-8") as f:
+        json.dump(key_map, f, indent=2, ensure_ascii=False)
+    if dest_dir.parent != dest_dir:
+        parent_map_path = dest_dir.parent / "r2_key_map.json"
+        with parent_map_path.open("w", encoding="utf-8") as f:
+            json.dump(key_map, f, indent=2, ensure_ascii=False)
+
     return len(selected)
 
 
@@ -326,6 +348,338 @@ def upload_ply(s3, bucket: str, ply_path: Path, ply_prefix: str) -> str:
     return key
 
 
+def upload_latest_json(s3, bucket: str, ply_r2_key: str, iterations: int) -> str:
+    import json
+
+    data = {
+        "version": 1,
+        "kind": "city_gs",
+        "asset": ply_r2_key,
+        "format": "ply",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "iterations": iterations,
+    }
+    key = "models/city_gs/latest.json"
+    info(f"R2 へ latest.json をアップロード: {key}")
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+    return key
+
+
+# We emit a CAMERA-TO-WORLD quaternion [qw,qx,qy,qz] (i.e. the inverse of COLMAP's stored world-to-camera rotation).
+def colmap_to_c2w(
+    qw: float, qx: float, qy: float, qz: float, tx: float, ty: float, tz: float
+) -> tuple[list[float], list[float]]:
+    import math
+
+    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    if norm > 0:
+        qw, qx, qy, qz = qw / norm, qx / norm, qy / norm, qz / norm
+
+    # Rotation matrix R_w2c from quaternion q_w2c
+    r11 = 1.0 - 2.0 * (qy * qy + qz * qz)
+    r12 = 2.0 * (qx * qy - qz * qw)
+    r13 = 2.0 * (qx * qz + qy * qw)
+
+    r21 = 2.0 * (qx * qy + qz * qw)
+    r22 = 1.0 - 2.0 * (qx * qx + qz * qz)
+    r23 = 2.0 * (qy * qz - qx * qw)
+
+    r31 = 2.0 * (qx * qz - qy * qw)
+    r32 = 2.0 * (qy * qz + qx * qw)
+    r33 = 1.0 - 2.0 * (qx * qx + qy * qy)
+
+    # R_c2w = R_w2c^T
+    # Position C = - R_c2w * t
+    cx = -(r11 * tx + r21 * ty + r31 * tz)
+    cy = -(r12 * tx + r22 * ty + r32 * tz)
+    cz = -(r13 * tx + r23 * ty + r33 * tz)
+
+    # Quaternion for R_c2w is q_w2c conjugate: [qw, -qx, -qy, -qz]
+    qw_c2w = qw
+    qx_c2w = -qx
+    qy_c2w = -qy
+    qz_c2w = -qz
+
+    return [float(cx), float(cy), float(cz)], [
+        float(qw_c2w),
+        float(qx_c2w),
+        float(qy_c2w),
+        float(qz_c2w),
+    ]
+
+
+def parse_colmap_cameras_text(cameras_file: Path) -> dict[int, float | None]:
+    import math
+
+    cameras_fov: dict[int, float | None] = {}
+    with cameras_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            camera_id = int(parts[0])
+            model = parts[1].upper()
+            width = float(parts[2])
+            height = float(parts[3])
+            params = [float(p) for p in parts[4:]]
+
+            fov = None
+            if model in (
+                "SIMPLE_PINHOLE",
+                "SIMPLE_RADIAL",
+                "RADIAL",
+                "SIMPLE_RADIAL_FISHEYE",
+                "RADIAL_FISHEYE",
+            ):
+                if len(params) >= 1 and params[0] > 0:
+                    fov = math.degrees(2.0 * math.atan(width / (2.0 * params[0])))
+            elif model in (
+                "PINHOLE",
+                "OPENCV",
+                "OPENCV_FISHEYE",
+                "FOV",
+                "THIN_PRISM_FISHEYE",
+            ):
+                if len(params) >= 1 and params[0] > 0:
+                    fov = math.degrees(2.0 * math.atan(width / (2.0 * params[0])))
+            cameras_fov[camera_id] = round(fov, 4) if fov is not None else None
+    return cameras_fov
+
+
+def parse_colmap_images_text(images_file: Path) -> list[dict]:
+    images = []
+    expect_header = True
+    with images_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if expect_header:
+                parts = line.split()
+                if len(parts) >= 10:
+                    image_id = int(parts[0])
+                    qw, qx, qy, qz = (
+                        float(parts[1]),
+                        float(parts[2]),
+                        float(parts[3]),
+                        float(parts[4]),
+                    )
+                    tx, ty, tz = (
+                        float(parts[5]),
+                        float(parts[6]),
+                        float(parts[7]),
+                    )
+                    camera_id = int(parts[8])
+                    name = " ".join(parts[9:])
+                    images.append(
+                        {
+                            "image_id": image_id,
+                            "qw": qw,
+                            "qx": qx,
+                            "qy": qy,
+                            "qz": qz,
+                            "tx": tx,
+                            "ty": ty,
+                            "tz": tz,
+                            "camera_id": camera_id,
+                            "name": name,
+                        }
+                    )
+                expect_header = False
+            else:
+                expect_header = True
+    return images
+
+
+# Fallback to binary parse if no text model exists
+def parse_colmap_cameras_binary(cameras_file: Path) -> dict[int, float | None]:
+    import math
+    import struct
+
+    MODEL_NUM_PARAMS = {
+        0: 3,
+        1: 4,
+        2: 4,
+        3: 5,
+        4: 8,
+        5: 8,
+        6: 12,
+        7: 5,
+        8: 4,
+        9: 5,
+        10: 12,
+    }
+    cameras_fov: dict[int, float | None] = {}
+    with cameras_file.open("rb") as f:
+        num_cameras = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_cameras):
+            camera_id, model_id, width, height = struct.unpack(
+                "<iiQQ", f.read(24)
+            )
+            num_params = MODEL_NUM_PARAMS.get(model_id, 0)
+            params = struct.unpack(f"<{num_params}d", f.read(8 * num_params))
+            fov = None
+            if model_id in (0, 2, 3, 8, 9):
+                if len(params) >= 1 and params[0] > 0:
+                    fov = math.degrees(2.0 * math.atan(width / (2.0 * params[0])))
+            elif model_id in (1, 4, 5, 7, 10):
+                if len(params) >= 1 and params[0] > 0:
+                    fov = math.degrees(2.0 * math.atan(width / (2.0 * params[0])))
+            cameras_fov[camera_id] = round(fov, 4) if fov is not None else None
+    return cameras_fov
+
+
+def parse_colmap_images_binary(images_file: Path) -> list[dict]:
+    import struct
+
+    images = []
+    with images_file.open("rb") as f:
+        num_images = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_images):
+            image_id, qw, qx, qy, qz, tx, ty, tz, camera_id = struct.unpack(
+                "<IddddddddI", f.read(64)
+            )
+            name_bytes = bytearray()
+            while True:
+                b = f.read(1)
+                if not b or b == b"\x00":
+                    break
+                name_bytes.extend(b)
+            name = name_bytes.decode("utf-8", errors="replace")
+            num_p2d = struct.unpack("<Q", f.read(8))[0]
+            f.seek(num_p2d * 24, 1)
+            images.append(
+                {
+                    "image_id": image_id,
+                    "qw": qw,
+                    "qx": qx,
+                    "qy": qy,
+                    "qz": qz,
+                    "tx": tx,
+                    "ty": ty,
+                    "tz": tz,
+                    "camera_id": camera_id,
+                    "name": name,
+                }
+            )
+    return images
+
+
+def export_placements(
+    s3, bucket: str, data_dir: Path, gs_repo: Path, ply_key: str | None
+) -> None:
+    import json
+
+    data_root = gs_repo / "data"
+    sparse_dir = None
+    for candidate in [
+        data_root / "sparse" / "0",
+        data_root / "sparse",
+    ]:
+        if (candidate / "images.txt").exists() or (candidate / "images.bin").exists():
+            sparse_dir = candidate
+            break
+
+    if sparse_dir is None:
+        for p in data_root.rglob("images.txt"):
+            sparse_dir = p.parent
+            break
+        if sparse_dir is None:
+            for p in data_root.rglob("images.bin"):
+                sparse_dir = p.parent
+                break
+
+    if sparse_dir is None:
+        info("COLMAP の sparse モデルが見つかりません。placements エクスポートをスキップします。")
+        return
+
+    try:
+        if (sparse_dir / "images.txt").exists() and (sparse_dir / "cameras.txt").exists():
+            info(f"COLMAP テキストモデルを読み込み中: {sparse_dir}")
+            cameras_fov = parse_colmap_cameras_text(sparse_dir / "cameras.txt")
+            raw_images = parse_colmap_images_text(sparse_dir / "images.txt")
+        elif (sparse_dir / "images.bin").exists() and (sparse_dir / "cameras.bin").exists():
+            info(f"COLMAP バイナリモデルを読み込み中 (テキストモデル未検出): {sparse_dir}")
+            cameras_fov = parse_colmap_cameras_binary(sparse_dir / "cameras.bin")
+            raw_images = parse_colmap_images_binary(sparse_dir / "images.bin")
+        else:
+            info(f"COLMAP sparse モデルファイルが不足しています ({sparse_dir})。placements エクスポートをスキップします。")
+            return
+    except Exception as e:
+        info(f"COLMAP sparse モデルの解析に失敗しました ({e})。placements エクスポートをスキップします。")
+        return
+
+    key_map = {}
+    for map_file in [data_dir / "r2_key_map.json", data_dir / "input" / "r2_key_map.json"]:
+        if map_file.exists():
+            try:
+                with map_file.open("r", encoding="utf-8") as f:
+                    key_map = json.load(f)
+                break
+            except Exception:
+                pass
+
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    placements = []
+
+    for img in raw_images:
+        local_name = Path(img["name"]).name
+        photo_key = key_map.get(local_name)
+        pos, rot = colmap_to_c2w(
+            img["qw"], img["qx"], img["qy"], img["qz"],
+            img["tx"], img["ty"], img["tz"]
+        )
+        fov = cameras_fov.get(img["camera_id"])
+        placements.append(
+            {
+                "id": Path(local_name).stem,
+                "photo_key": photo_key,
+                "local_name": local_name,
+                "position": pos,
+                "rotation": rot,
+                "fov_deg": fov,
+                "source": "colmap",
+                "created_at": created_at,
+            }
+        )
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    export_key = f"placements/{ts}.json"
+    info(f"R2 へ placements をアップロード: {export_key} ({len(placements)} 件)")
+    s3.put_object(
+        Bucket=bucket,
+        Key=export_key,
+        Body=json.dumps(placements, indent=2, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+    index_data = {
+        "version": 1,
+        "updated_at": created_at,
+        "export_key": export_key,
+        "count": len(placements),
+        "source": "colmap",
+        "model_ref": ply_key,
+        "transform": None,
+    }
+    index_key = "placements/index.json"
+    info(f"R2 へ placements/index.json を更新: {index_key}")
+    s3.put_object(
+        Bucket=bucket,
+        Key=index_key,
+        Body=json.dumps(index_data, indent=2, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Shibuya 3DGS batch")
     parser.add_argument(
@@ -366,6 +720,8 @@ def main() -> None:
     dry_run = bool(wf["dry_run"])
     skip_train = bool(wf["skip_train"])
     upload_ply_flag = bool(wf["upload_ply"])
+    export_latest_flag = bool(wf.get("export_latest", True))
+    export_placements_flag = bool(wf.get("export_placements", True))
     iterations = int(wf["iterations"])
     save_iterations = list(wf.get("save_iterations") or [7000, iterations])
     data_dir = Path(paths["data_dir"])
@@ -412,11 +768,22 @@ def main() -> None:
 
     ok(f"学習完了: {ply}")
 
+    ply_key = None
     if upload_ply_flag:
-        key = upload_ply(s3, bucket, ply, ply_prefix)
-        ok(f"R2 アップロード済: {key}")
+        ply_key = upload_ply(s3, bucket, ply, ply_prefix)
+        ok(f"R2 アップロード済: {ply_key}")
+        if export_latest_flag:
+            latest_key = upload_latest_json(s3, bucket, ply_key, iterations)
+            ok(f"R2 latest.json 更新済: {latest_key}")
+        else:
+            info("export_latest=false のため latest.json の更新をスキップ")
     else:
         info("upload_ply=false のため R2 への送信をスキップ")
+
+    if export_placements_flag:
+        export_placements(s3, bucket, data_dir, gs_repo, ply_key)
+    else:
+        info("export_placements=false のため placements のエクスポートをスキップ")
 
     ok("バッチ完了")
 
